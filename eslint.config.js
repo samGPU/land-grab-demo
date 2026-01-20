@@ -17,7 +17,7 @@ export default [
         sourceType: 'module',
       },
     },
-    settings: { react: { version: '18.3' } },
+    settings: { react: { version: '19.2' } },
     plugins: {
       react,
       'react-hooks': reactHooks,
@@ -33,6 +33,17 @@ export default [
         'warn',
         { allowConstantExport: true },
       ],
+      // Disable prop-types validation (using vanilla JS, not TypeScript)
+      'react/prop-types': 'off',
+      // Allow R3F unknown DOM properties (they're Three.js props)
+      'react/no-unknown-property': ['error', { 
+        ignore: [
+          'args', 'position', 'intensity', 'castShadow', 'roughness', 'metalness',
+          'geometry', 'transparent', 'side', 'visible', 'object'
+        ] 
+      }],
+      // Allow unused vars that start with underscore
+      'no-unused-vars': ['error', { 'argsIgnorePattern': '^_' }],
     },
   },
 ]
