@@ -127,6 +127,7 @@ interactions/pointerEvents.js
 events/CELL_SELECTED
         ↓
 api/landApi.js
+```
 
 ---
 
@@ -167,6 +168,12 @@ Early milestones focus on:
 
 Persistence, auth, and economy are layered in later without changing the viewer.
 
+### Forbidden Patterns
+
+- Viewer components using window, document, or DOM APIs
+- Interaction logic depending on mouse-specific properties
+- Game logic importing from platform or Platform code implementing game rules
+
 ---
 
 ## High-Level Directory Structure
@@ -188,7 +195,12 @@ src/
     HexGrid.jsx
     LandMesh.jsx
 
-  interactions/        # Input & interaction mapping
+  platform/
+    web/
+      input.js         # Mouse / pointer bindings
+    native/
+      input.js         # Touch / gesture bindings
 
   App.jsx              # Application shell
   main.jsx             # Vite entry point
+```
