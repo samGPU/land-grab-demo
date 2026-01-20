@@ -15,7 +15,8 @@
     "h3-js": "^4.4.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "three": "^0.182.0"
+    "three": "^0.182.0",
+    "three-globe": "^2.45.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

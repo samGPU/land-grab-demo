@@ -17,9 +17,9 @@ export const DEFAULT_RESOLUTION = 12;
 
 /**
  * Lower resolution for visible grid rendering (performance optimization)
- * Resolution 4 provides ~1,770 km² hexagons - visible at globe scale
+ * Resolution 2 provides ~86,000 km² hexagons - visible at globe scale
  */
-export const VISIBLE_GRID_RESOLUTION = 4;
+export const VISIBLE_GRID_RESOLUTION = 2;
 
 /**
  * Convert latitude/longitude to H3 cell ID

@@ -12,11 +12,54 @@
  * The scene graph inside is identical on both platforms.
  */
 
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
-import { Suspense } from 'react';
+import { Suspense, useRef } from 'react';
+import * as THREE from 'three';
 import Globe from './Globe.jsx';
 import HexGrid from './HexGrid.jsx';
+
+const MIN_DISTANCE = 1.2;
+const MAX_DISTANCE = 3;
+
+function SceneControls() {
+  const controlsRef = useRef();
+  const { camera } = useThree();
+
+  useFrame(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+
+    // Reduce drag strength when zoomed in (closer to globe surface).
+    // We treat this as "panning" strength in a globe navigation sense.
+    const distance = camera.position.distanceTo(controls.target);
+    const t = THREE.MathUtils.clamp((distance - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE), 0, 1);
+
+    controls.rotateSpeed = THREE.MathUtils.lerp(0.15, 0.5, t);
+    controls.zoomSpeed = THREE.MathUtils.lerp(0.25, 0.5, t);
+
+    // If we ever enable pan, keep it similarly damped near the surface.
+    // (Does nothing while enablePan={false}.)
+    controls.panSpeed = THREE.MathUtils.lerp(0.05, 0.5, t);
+  });
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      enablePan={false}
+      enableZoom={true}
+      enableRotate={true}
+      // Globe radius is 1. Allow zooming close to the surface.
+      // Note: "street-level" detail also depends on texture/tiles, not just camera distance.
+      minDistance={MIN_DISTANCE}
+      maxDistance={MAX_DISTANCE}
+      enableDamping
+      dampingFactor={0.08}
+      rotateSpeed={0.5}
+      zoomSpeed={0.5}
+    />
+  );
+}
 
 /**
  * GlobeScene component
@@ -25,10 +68,12 @@ import HexGrid from './HexGrid.jsx';
 export default function GlobeScene() {
   return (
     <Canvas
+      dpr={[1, 1.5]}
       camera={{
         position: [0, 0, 2.5],
         fov: 45,
-        near: 0.1,
+        // Allow close zoom without near-plane clipping.
+        near: 0.01,
         far: 1000,
       }}
       style={{
@@ -55,23 +100,9 @@ export default function GlobeScene() {
         {/* H3 hex grid overlay */}
         <HexGrid />
       </Suspense>
-      
-      {/* 
-        OrbitControls for camera navigation
-        ARCHITECTURAL NOTE: 
-        drei's OrbitControls works on both web and native,
-        but we may need to swap this for custom touch controls on native
-        for better mobile UX. That change would be isolated to this file.
-      */}
-      <OrbitControls
-        enablePan={false}
-        enableZoom={true}
-        enableRotate={true}
-        minDistance={1.2}
-        maxDistance={4}
-        rotateSpeed={0.5}
-        zoomSpeed={0.5}
-      />
+
+      {/* OrbitControls for camera navigation */}
+      <SceneControls />
     </Canvas>
   );
 }

@@ -19,23 +19,50 @@
 
 import { useMemo, useCallback, useState, useEffect } from 'react';
 import * as THREE from 'three';
-import { cellToBoundary, latLngToCell, gridDisk } from 'h3-js';
+import { useFrame, useThree } from '@react-three/fiber';
+import { cellToBoundary, cellToLatLng, latLngToCell, gridDisk } from 'h3-js';
 import { GLOBE_RADIUS } from './Globe.jsx';
+import { VISIBLE_GRID_RESOLUTION } from '../core/h3/index.js';
 import { createPointerHandlers } from '../platform/web/input.js';
 import { subscribe, getState } from '../api/landApi.js';
 import { CellState } from '../core/domain/cell.js';
 
 /**
- * H3 resolution for visible grid
- * Lower resolution (bigger hexes) for performance at globe scale
- * Resolution 2 = ~86,000 km² hexes, good for full globe view
+ * Clamp the number of rings for safety.
  */
-const GRID_RESOLUTION = 2;
+const MIN_GRID_RINGS = 8;
+const MAX_GRID_RINGS = 140;
 
-/**
- * Number of hex rings to render around view center
- */
-const GRID_RINGS = 15;
+// Rendering offsets to keep the hex overlay slightly above the globe surface.
+// Small values help avoid z-fighting/intersection without looking like it floats.
+const OUTLINE_RADIUS_MULT = 1.004;
+const FILL_RADIUS_MULT = 1.005;
+const INTERACTION_RADIUS_MULT = 1.006;
+
+function degToRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+function angularDistanceRad(lat1, lng1, lat2, lng2) {
+  const phi1 = degToRad(lat1);
+  const phi2 = degToRad(lat2);
+  const dLambda = degToRad(lng2 - lng1);
+
+  const cosD = Math.sin(phi1) * Math.sin(phi2) + Math.cos(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+  // Numerical safety.
+  const clamped = Math.min(1, Math.max(-1, cosD));
+  return Math.acos(clamped);
+}
+
+function estimateRingStepRad(centerCell) {
+  const [centerLat, centerLng] = cellToLatLng(centerCell);
+  const ring1 = gridDisk(centerCell, 1);
+  const neighborCell = ring1.find((id) => id !== centerCell);
+  if (!neighborCell) return null;
+
+  const [nLat, nLng] = cellToLatLng(neighborCell);
+  return angularDistanceRad(centerLat, centerLng, nLat, nLng);
+}
 
 /**
  * Convert lat/lng to 3D Cartesian coordinates on globe surface
@@ -108,11 +135,11 @@ function getCellColor(cellId, cells, selectedCellId, hoveredCellId) {
 /**
  * HexCell - Individual hexagonal cell mesh
  */
-function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMove, onPointerLeave }) {
+function HexCell({ cellId: _cellId, boundary, color }) {
   // cellId available for debugging: _cellId
   // Convert boundary coordinates to 3D vectors
   const geometry = useMemo(() => {
-    const vectors = boundary.map(([lat, lng]) => latLngToVector3(lat, lng, GLOBE_RADIUS * 1.001));
+    const vectors = boundary.map(([lat, lng]) => latLngToVector3(lat, lng, GLOBE_RADIUS * OUTLINE_RADIUS_MULT));
     
     // Create line geometry for hex outline
     const points = [...vectors, vectors[0]]; // Close the loop
@@ -121,16 +148,20 @@ function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMov
     return lineGeometry;
   }, [boundary]);
   
-  // Create fill geometry for hover/selection
+  const isHighlighted = color !== '#ffffff';
+
+  // Only allocate the fill geometry when we actually need it (hover/selected).
   const fillGeometry = useMemo(() => {
-    const vectors = boundary.map(([lat, lng]) => latLngToVector3(lat, lng, GLOBE_RADIUS * 1.002));
-    
+    if (!isHighlighted) return null;
+
+    const vectors = boundary.map(([lat, lng]) => latLngToVector3(lat, lng, GLOBE_RADIUS * FILL_RADIUS_MULT));
+
     // Calculate center point
     const center = vectors.reduce(
       (acc, v) => acc.add(v),
       new THREE.Vector3()
     ).divideScalar(vectors.length);
-    
+
     // Create triangles from center to each edge
     const positions = [];
     for (let i = 0; i < vectors.length; i++) {
@@ -140,15 +171,13 @@ function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMov
       positions.push(v1.x, v1.y, v1.z);
       positions.push(v2.x, v2.y, v2.z);
     }
-    
+
     const fillGeom = new THREE.BufferGeometry();
     fillGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     fillGeom.computeVertexNormals();
-    
+
     return fillGeom;
-  }, [boundary]);
-  
-  const isHighlighted = color !== '#ffffff';
+  }, [boundary, isHighlighted]);
   
   return (
     <group>
@@ -162,13 +191,8 @@ function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMov
       </line>
       
       {/* Fill (only when highlighted) */}
-      {isHighlighted && (
-        <mesh
-          geometry={fillGeometry}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerLeave={onPointerLeave}
-        >
+      {isHighlighted && fillGeometry && (
+        <mesh geometry={fillGeometry}>
           <meshBasicMaterial
             color={color}
             opacity={0.4}
@@ -177,17 +201,6 @@ function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMov
           />
         </mesh>
       )}
-      
-      {/* Invisible interaction mesh (always present for raycasting) */}
-      <mesh
-        geometry={fillGeometry}
-        visible={false}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerLeave={onPointerLeave}
-      >
-        <meshBasicMaterial transparent opacity={0} />
-      </mesh>
     </group>
   );
 }
@@ -197,29 +210,65 @@ function HexCell({ cellId: _cellId, boundary, color, onPointerDown, onPointerMov
  * Generates and renders the H3 grid overlay
  */
 export default function HexGrid() {
+  const { camera } = useThree();
+
   // Subscribe to API state for cell colors
   const [apiState, setApiState] = useState(getState());
+
+  // Track which H3 cell is at the center of the current view.
+  // We update it as the camera moves so the grid follows you.
+  const [viewCenterCellId, setViewCenterCellId] = useState(
+    () => latLngToCell(0, 0, VISIBLE_GRID_RESOLUTION)
+  );
   
   useEffect(() => {
     return subscribe(setApiState);
   }, []);
+
+  useFrame(() => {
+    // The point on the globe facing the camera is in the direction of the camera position.
+    const dist = camera.position.length();
+    if (dist <= 0) return;
+
+    const facingPoint = camera.position.clone().normalize().multiplyScalar(GLOBE_RADIUS);
+    const { lat, lng } = vector3ToLatLng(facingPoint);
+    const nextCenterCellId = latLngToCell(lat, lng, VISIBLE_GRID_RESOLUTION);
+
+    if (nextCenterCellId !== viewCenterCellId) {
+      setViewCenterCellId(nextCenterCellId);
+    }
+  });
   
-  // Generate hex cells for visible area
-  // For now, generate a grid centered on (0, 0) - this could be dynamic based on camera
+  // Generate hex cells for at least the visible hemisphere.
+  // We approximate a hemisphere by generating enough H3 rings around the view-center cell
+  // so the angular radius is >= 90°.
   const hexCells = useMemo(() => {
-    const centerCell = latLngToCell(0, 0, GRID_RESOLUTION);
-    const cellIds = gridDisk(centerCell, GRID_RINGS);
+    const centerCell = viewCenterCellId;
+
+    // Estimate how much angular radius each additional ring covers by measuring
+    // the distance between the center cell and one of its neighbors.
+    const ringStep = estimateRingStepRad(centerCell) ?? degToRad(1);
+
+    // 90° hemisphere plus a small margin to ensure we cover the full visible edge.
+    const desiredRadius = Math.PI / 2 + degToRad(8);
+    const rings = THREE.MathUtils.clamp(
+      Math.ceil(desiredRadius / Math.max(ringStep, 1e-6)),
+      MIN_GRID_RINGS,
+      MAX_GRID_RINGS
+    );
+
+    const cellIds = gridDisk(centerCell, rings);
     
     return cellIds.map(cellId => ({
       cellId,
       boundary: cellToBoundary(cellId),
     }));
-  }, []);
+  }, [viewCenterCellId]);
   
   // Function to convert 3D point to H3 cell ID
   const getCellIdFromPoint = useCallback((point) => {
     const { lat, lng } = vector3ToLatLng(point);
-    return latLngToCell(lat, lng, GRID_RESOLUTION);
+    return latLngToCell(lat, lng, VISIBLE_GRID_RESOLUTION);
   }, []);
   
   // Create pointer handlers from platform layer
@@ -230,15 +279,26 @@ export default function HexGrid() {
   
   return (
     <group>
+      {/*
+        Single interaction surface for hover/click.
+        This removes hundreds of per-cell invisible meshes and dramatically
+        reduces raycasting + draw-call overhead.
+      */}
+      <mesh
+        onPointerDown={pointerHandlers.onPointerDown}
+        onPointerMove={pointerHandlers.onPointerMove}
+        onPointerLeave={pointerHandlers.onPointerLeave}
+      >
+        <sphereGeometry args={[GLOBE_RADIUS * INTERACTION_RADIUS_MULT, 48, 48]} />
+        <meshBasicMaterial transparent opacity={0} />
+      </mesh>
+
       {hexCells.map(({ cellId, boundary }) => (
         <HexCell
           key={cellId}
           cellId={cellId}
           boundary={boundary}
           color={getCellColor(cellId, apiState.cells, apiState.selectedCellId, apiState.hoveredCellId)}
-          onPointerDown={pointerHandlers.onPointerDown}
-          onPointerMove={pointerHandlers.onPointerMove}
-          onPointerLeave={pointerHandlers.onPointerLeave}
         />
       ))}
     </group>
